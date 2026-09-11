@@ -1,11 +1,16 @@
 import os
+import asyncio
+import threading
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.ext import Application, CommandHandler, ContextTypes
 
+# ==================== CẤU HÌNH HỆ THỐNG ====================
 app = FastAPI()
 
 app.add_middleware(
@@ -17,11 +22,14 @@ app.add_middleware(
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+MINI_APP_URL = "https://github.io"
 WEBHOOK_API_KEY = "SECRET_SEPAY_KEY_123"
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
+# Khởi tạo database trên PostgreSQL đám mây
 @app.on_event("startup")
 def init_db():
     conn = get_db_connection()
@@ -54,17 +62,17 @@ def init_db():
         delivered_data TEXT
     )""")
     cursor.execute("SELECT COUNT(*) FROM products")
-    if cursor.fetchone()[0] == 0:
+    if cursor.fetchone() == 0:
         cursor.execute("INSERT INTO products (name, price, description) VALUES ('Tài khoản Clone Facebook', 20000, 'Clone 50-100 bạn bè')")
         cursor.execute("INSERT INTO products (name, price, description) VALUES ('Key Phần Mềm VPN 1 Tháng', 50000, 'Key kích hoạt bản quyền 30 ngày')")
         cursor.execute("INSERT INTO resources (product_id, data) VALUES (1, 'clone_fb_user1|pass1|fa2')")
         cursor.execute("INSERT INTO resources (product_id, data) VALUES (1, 'clone_fb_user2|pass2|fa2')")
         cursor.execute("INSERT INTO resources (product_id, data) VALUES (2, 'VPN-KEY-XXXX-YYYY')")
-        cursor.execute("INSERT INTO users (user_id, balance) VALUES (9999, 100000)")
     conn.commit()
     cursor.close()
     conn.close()
 
+# ==================== KHU VỰC API BACKEND ====================
 class PurchaseRequest(BaseModel):
     user_id: int
     product_id: int
@@ -158,3 +166,58 @@ def buy_product_via_wallet(req: PurchaseRequest):
     finally:
         cursor.close()
         conn.close()
+
+# ==================== KHU VỰC BOT TELEGRAM CHẠY NGẦM ====================
+async def bot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    first_name = update.effective_user.first_name
+    
+    # Tạo ví tự động cho khách khi bấm /start chat với bot
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO users (user_id, balance) VALUES (%s, 0) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception:
+        pass
+
+    keyboard = [[InlineKeyboardButton("🛍️ Mở Cửa Hàng (Mini App)", web_app=WebAppInfo(url=MINI_APP_URL))]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    welcome_text = (
+        f"👋 Chào mừng {first_name} đến với **Kho Tài Nguyên MMO**!\n\n"
+        f"📱 Cửa hàng Mini App đã được tích hợp trực tiếp. Bạn có thể mua sắm và quản lý ví tiền cực kỳ nhanh chóng.\n\n"
+        f"💳 ID ví thành viên của bạn là: `{user_id}`\n\n"
+        f"Hãy bấm nút **Mở Cửa Hàng** dưới đây để bắt đầu!"
+    )
+    await update.message.reply_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+# Lệnh Admin nạp tiền nhanh ngay trong chat: /cong_tien ID Số_tiền
+async def admin_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        target_user = int(context.args[0])
+        amount = int(context.args[1])
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, target_user))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        await update.message.reply_text(f"✅ Đã cộng **{amount:,} VND** vào ví thành viên `{target_user}`!")
+    except Exception:
+        await update.message.reply_text("⚠️ Cú pháp nạp tiền sai! Dạng chuẩn: `/cong_tien ID SO_TIEN`")
+
+def run_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bot_app = Application.builder().token(TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", bot_start))
+    bot_app.add_handler(CommandHandler("cong_tien", admin_deposit))
+    bot_app.run_polling(close_loop=False)
+
+# Chạy bot trong một luồng riêng biệt để tránh nghẽn API của Web App
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
