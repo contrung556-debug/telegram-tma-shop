@@ -1,6 +1,6 @@
 import os
 import asyncio
-import threading
+import logging
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException, Header
@@ -10,7 +10,10 @@ from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ==================== CẤU HÌNH HỆ THỐNG ====================
+# Config Logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
 
 app.add_middleware(
@@ -29,9 +32,9 @@ WEBHOOK_API_KEY = "SECRET_SEPAY_KEY_123"
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
-# Khởi tạo database trên PostgreSQL đám mây
 @app.on_event("startup")
-def init_db():
+async def startup_event():
+    # 1. Khởi tạo Database
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -62,7 +65,7 @@ def init_db():
         delivered_data TEXT
     )""")
     cursor.execute("SELECT COUNT(*) FROM products")
-    if cursor.fetchone() == 0:
+    if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO products (name, price, description) VALUES ('Tài khoản Clone Facebook', 20000, 'Clone 50-100 bạn bè')")
         cursor.execute("INSERT INTO products (name, price, description) VALUES ('Key Phần Mềm VPN 1 Tháng', 50000, 'Key kích hoạt bản quyền 30 ngày')")
         cursor.execute("INSERT INTO resources (product_id, data) VALUES (1, 'clone_fb_user1|pass1|fa2')")
@@ -71,8 +74,11 @@ def init_db():
     conn.commit()
     cursor.close()
     conn.close()
+    
+    # 2. Khởi chạy Bot Telegram lồng trong vòng lặp của FastAPI
+    asyncio.create_task(run_bot_async())
 
-# ==================== KHU VỰC API BACKEND ====================
+# ==================== API BACKEND ====================
 class PurchaseRequest(BaseModel):
     user_id: int
     product_id: int
@@ -167,12 +173,11 @@ def buy_product_via_wallet(req: PurchaseRequest):
         cursor.close()
         conn.close()
 
-# ==================== KHU VỰC BOT TELEGRAM CHẠY NGẦM ====================
+# ==================== BOT TELEGRAM ASYNC ====================
 async def bot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     first_name = update.effective_user.first_name
     
-    # Tạo ví tự động cho khách khi bấm /start chat với bot
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -194,9 +199,7 @@ async def bot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
-# Lệnh Admin nạp tiền nhanh ngay trong chat: /cong_tien ID Số_tiền
 async def admin_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     try:
         target_user = int(context.args[0])
         amount = int(context.args[1])
@@ -210,14 +213,14 @@ async def admin_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("⚠️ Cú pháp nạp tiền sai! Dạng chuẩn: `/cong_tien ID SO_TIEN`")
 
-def run_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+async def run_bot_async():
+    logger.info("Đang khởi động luồng đầu não Bot Telegram...")
     bot_app = Application.builder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", bot_start))
     bot_app.add_handler(CommandHandler("cong_tien", admin_deposit))
-    bot_app.run_polling(close_loop=False)
-
-# Chạy bot trong một luồng riêng biệt để tránh nghẽn API của Web App
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
+    
+    # Khởi tạo và chạy ngầm bất đồng bộ song song với cổng mạng của FastAPI
+    await bot_app.initialize()
+    await bot_app.updater.start_polling()
+    await bot_app.start()
+    logger.info("Đầu não Bot Telegram đã kích hoạt và đang lắng nghe tin nhắn!")
